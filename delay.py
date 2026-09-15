@@ -3,7 +3,7 @@ import pandas as pd
 import joblib
 
 # Load the trained model
-filename = r'logistic_model.sav'
+filename = r'logi.sav'
 loaded_model = joblib.load(open(filename, 'rb'))
 
 # Define the correct column names
