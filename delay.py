@@ -1,53 +1,113 @@
+
 import streamlit as st
-import pandas as pd
+import os
 import joblib
+import numpy as np
+import pandas as pd
+from groq import Groq
 
-# Load the trained model
-filename = r'logi.sav'
-loaded_model = joblib.load(open(filename, 'rb'))
+# --- Page Configuration ---
+st.set_page_config(page_title="Delivery Delay Predictor", layout="centered")
+st.title("🚚 Delivery Delay Predictor")
+st.markdown("Enter delivery conditions in natural language to predict potential delays.")
 
-# Define the correct column names
-columns = ['Delivery_Distance', 'Traffic_Congestion', 'Weather_Condition',
-           'Delivery_Slot', 'Driver_Experience', 'Num_Stops', 'Vehicle_Age',
-           'Road_Condition_Score', 'Package_Weight', 'Fuel_Efficiency',
-           'Warehouse_Processing_Time']
+# --- Load Model and Feature Names ---
+# Load the trained logistic regression model
+try:
+    logi = joblib.load("logi.sav")
+except FileNotFoundError:
+    st.error("Error: 'logi.sav' model file not found. Please ensure the model is trained and saved.")
+    st.stop()
 
-# Define the prediction function
-def predict_delivery_delay(features):
+# Define feature names (from X.columns in the notebook)
+feature_names = [
+    'Delivery_Distance', 'Traffic_Congestion', 'Weather_Condition',
+    'Delivery_Slot', 'Driver_Experience', 'Num_Stops', 'Vehicle_Age',
+    'Road_Condition_Score', 'Package_Weight', 'Fuel_Efficiency',
+    'Warehouse_Processing_Time'
+]
+
+# --- Groq API Key Input ---
+groq_api_key = st.text_input("Enter your Groq API Key:", type="password", help="You can get your API key from app.groq.com")
+
+# --- predict_with_natural_language Function ---
+def predict_with_natural_language(natural_language_input, model, feature_names, groq_client):
     """
-    Predicts the delivery delay based on input features.
+    Uses the Groq API to parse natural language input and predict with the given model.
+
+    Args:
+        natural_language_input (str): The natural language description of the delivery conditions.
+        model: The trained scikit-learn model (e.g., LogisticRegression).
+        feature_names (list): A list of feature names that the model expects.
+        groq_client: An initialized Groq client object.
+
+    Returns:
+        tuple: (prediction, probabilities, extracted_features) or (None, None, None) on error.
     """
-    prediction = loaded_model.predict(features)
-    return prediction
 
-# Create the Streamlit app
-st.title("Delivery Delay Prediction")
+    prompt = f"""You are an expert in parsing delivery condition descriptions. \nExtract the following {len(feature_names)} numerical features from the given natural language input. \nPresent them as a Python list of integers or floats, in the exact order specified. \nIf a value is not explicitly mentioned, try to infer a reasonable default or return 'None' for it. \nDo not include any other text or explanation, just the list. \nMake sure the list has exactly {len(feature_names)} elements.\n\nFeatures in order: {feature_names}\n\nNatural language input: {natural_language_input}"""
 
-# Get user input
-st.write("Please provide the following information:")
-Delivery_Distance = st.number_input("Delivery Distance (in km)", min_value=0.0)
-Traffic_Congestion = st.number_input("Traffic Congestion Level (1-5)", min_value=1, max_value=5)
-Weather_Condition = st.number_input("Weather Condition (1-5)", min_value=1, max_value=5)
-Delivery_Slot = st.number_input("Delivery Slot (1-based index)", min_value=1)
-Driver_Experience = st.number_input("Driver Experience (in years)", min_value=0.0)
-Num_Stops = st.number_input("Number of Stops", min_value=0)
-Vehicle_Age = st.number_input("Vehicle Age (in years)", min_value=0.0)
-Road_Condition_Score = st.number_input("Road Condition Score (1-5)", min_value=1, max_value=5)
-Package_Weight = st.number_input("Package Weight (in kg)", min_value=0.0)
-Fuel_Efficiency = st.number_input("Fuel Efficiency (in km/liter)", min_value=0.0)
-Warehouse_Processing_Time = st.number_input("Warehouse Processing Time (in minutes)", min_value=0.0)
+    try:
+        completion = groq_client.chat.completions.create(
+            model="openai/gpt-oss-120b", # The specified Groq model
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt,
+                }
+            ],
+            temperature=0.0,
+            stream=False
+        )
 
-# Create a dataframe with the user input
-input_data = pd.DataFrame([[Delivery_Distance, Traffic_Congestion, Weather_Condition,
-                            Delivery_Slot, Driver_Experience, Num_Stops, Vehicle_Age,
-                            Road_Condition_Score, Package_Weight, Fuel_Efficiency,
-                            Warehouse_Processing_Time]], columns=columns)
+        groq_output = completion.choices[0].message.content
+        st.sidebar.text(f"Groq output: {groq_output}") # Display Groq output in sidebar for debugging
 
-# Make a prediction
-# Make a prediction
-if st.button("Predict Delivery Delay"):
-    prediction = predict_delivery_delay(input_data)
-    if prediction[0] == 0:
-        st.write("Predicted Delivery Delay: 0 (No significant delay expected)")
+        extracted_features = eval(groq_output)
+        if not isinstance(extracted_features, list):
+            raise ValueError("Groq did not return a list.")
+        if len(extracted_features) != len(feature_names):
+            raise ValueError(f"Expected {len(feature_names)} features, but Groq returned {len(extracted_features)}.")
+        
+        # Handle None values by converting to a default (e.g., 0 or mean of column if applicable)
+        # For this example, let's convert None to 0, but in a real scenario, more sophisticated imputation might be needed.
+        extracted_features_processed = [0 if x is None else x for x in extracted_features]
+
+        input_data = np.array([extracted_features_processed], dtype=float)
+        prediction = model.predict(input_data)[0]
+        probabilities = model.predict_proba(input_data)[0]
+        return prediction, probabilities, extracted_features_processed
+    except Exception as e:
+        st.error(f"Error processing request: {e}")
+        return None, None, None
+
+# --- Natural Language Input ---
+user_input = st.text_area("Describe the delivery conditions here:",
+                          "A delivery of 15 miles, moderate traffic, clear weather, afternoon slot, experienced driver (10 years), 5 stops, new vehicle (2 years old), good road conditions (score 4), package weight 5kg, good fuel efficiency (15 km/l), and 60 minutes processing time.",
+                          height=150)
+
+# --- Prediction Button ---
+if st.button("Predict Delay"):
+    if not groq_api_key:
+        st.warning("Please enter your Groq API Key to proceed.")
+    elif not user_input:
+        st.warning("Please enter a natural language description.")
     else:
-        st.write("Predicted Delivery Delay: 1 (Delay expected)")
+        try:
+            client = Groq(api_key=groq_api_key)
+            prediction, probabilities, features = predict_with_natural_language(
+                user_input, logi, feature_names, client
+            )
+
+            if prediction is not None:
+                st.subheader("Prediction Results:")
+                st.write(f"**Natural Language Input:** {user_input}")
+                st.write(f"**Extracted Features:** {features}")
+                st.write(f"**Prediction:** {'⚠️ Delay Expected' if prediction == 1 else '✅ No Delay Expected'}")
+                st.write(f"**Probability of No Delay:** {probabilities[0]:.2f}")
+                st.write(f"**Probability of Delay:** {probabilities[1]:.2f}")
+            else:
+                st.error("Could not make a prediction based on the natural language input. Please check your input and API key.")
+        except Exception as e:
+            st.error(f"Failed to initialize Groq client or make API call: {e}")
+            st.info("Please ensure your Groq API key is valid and has the necessary permissions.")
